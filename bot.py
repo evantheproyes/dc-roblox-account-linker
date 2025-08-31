@@ -5,6 +5,8 @@ import requests
 import json
 import os
 from dotenv import load_dotenv
+from aiohttp import web
+import asyncio
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -13,7 +15,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 linked_accounts_file = "linked_accounts.json"
 ROBLOX_API_URL = "https://inventory.roblox.com/v1/users/{user_id}/items/GamePass/{gamepass_id}"
 CONFIG_FILE = "config.json"
-ADMIN_ROLE_NAME = "Y5 (owner)"  # Set your admin role name
+ADMIN_ROLE_NAME = "🔨Mod"  # Set your admin role name
 OWNER_ID = 1322627642746339432  # Replace with your Discord user ID
 
 # Load config
@@ -52,10 +54,10 @@ def save_linked_accounts():
 
 
 def is_admin(interaction: discord.Interaction) -> bool:
-    return (
-        interaction.user.get_role(discord.utils.get(interaction.guild.roles, name=ADMIN_ROLE_NAME).id)
-        or interaction.user.id == OWNER_ID
-    )
+    role = discord.utils.get(interaction.guild.roles, name=ADMIN_ROLE_NAME)
+    if role is None:
+        return False
+    return (role in interaction.user.roles) or (interaction.user.id == OWNER_ID)
 
 
 @bot.tree.command(name="link-roblox", description="Link your Roblox account to your Discord account.")
@@ -163,7 +165,6 @@ async def list_linked(interaction: discord.Interaction):
 
     description = ""
     for discord_id, roblox_id in linked_accounts["discord_to_roblox"].items():
-        user = await bot.fetch_user(int(discord_id))
         description += f"<@{discord_id}> ➜ `{roblox_id}`\n"
 
     embed = discord.Embed(title="🔗 Linked Accounts", description=description or "None found.", color=discord.Color.blue())
@@ -249,6 +250,30 @@ async def on_ready():
     await bot.tree.sync()
     print(f"Logged in as {bot.user}")
 
-# Run bot
-load_dotenv()
-bot.run(os.getenv("DISCORD_TOKEN"))
+
+# ----------- Minimal web server for Render -----------
+
+async def handle(request):
+    return web.Response(text="Bot is running")
+
+async def run_webserver():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    port = int(os.environ.get("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"Web server running on port {port}")
+
+
+# ----------- Run bot and webserver concurrently -----------
+
+async def main():
+    await run_webserver()
+    await bot.start(os.getenv("DISCORD_TOKEN"))
+
+
+if __name__ == "__main__":
+    load_dotenv()
+    asyncio.run(main())
