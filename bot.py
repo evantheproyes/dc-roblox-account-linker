@@ -7,25 +7,30 @@ from dotenv import load_dotenv
 from aiohttp import web
 import asyncio
 import aiohttp
+from datetime import datetime, timedelta
+import secrets
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 linked_accounts_file = "linked_accounts.json"
-ROBLOX_API_URL = "https://inventory.roblox.com/v1/users/{user_id}/items/GamePass/{gamepass_id}"
 CONFIG_FILE = "config.json"
-ADMIN_ROLE_NAME = "🔨Mod"  # Set your admin role name
-OWNER_ID = 1322627642746339432  # Replace with your Discord user ID
+ADMIN_ROLE_NAME = "🔨Mod"
+SUPPORTER_ROLE_NAME = "Supporter"
+OWNER_ID = 1322627642746339432
+BACKEND_URL = "https://YOUR_RENDER_BACKEND_URL"  # Replace with your actual endpoint
+ROBLOX_API_URL = "https://inventory.roblox.com/v1/users/{user_id}/items/GamePass/{gamepass_id}"
 
-# Load config
+
+# ------------------- Load Config & Accounts -------------------
+
 try:
     with open(CONFIG_FILE, "r") as f:
         config = json.load(f)
 except FileNotFoundError:
     config = {"gamepass_roles": []}
 
-# Load linked accounts
 try:
     with open(linked_accounts_file, "r") as f:
         temp_accounts = json.load(f)
@@ -38,14 +43,17 @@ try:
             linked_accounts = {
                 "discord_to_roblox": discord_to_roblox,
                 "roblox_to_discord": roblox_to_discord,
-                "force_linked_users": []
+                "force_linked_users": [],
+                "generated_codes": {}
             }
         else:
             linked_accounts = temp_accounts
             if "force_linked_users" not in linked_accounts:
                 linked_accounts["force_linked_users"] = []
+            if "generated_codes" not in linked_accounts:
+                linked_accounts["generated_codes"] = {}
 except FileNotFoundError:
-    linked_accounts = {"discord_to_roblox": {}, "roblox_to_discord": {}, "force_linked_users": []}
+    linked_accounts = {"discord_to_roblox": {}, "roblox_to_discord": {}, "force_linked_users": [], "generated_codes": {}}
 
 
 def save_linked_accounts():
@@ -60,7 +68,12 @@ def is_admin(interaction: discord.Interaction) -> bool:
     return (role in interaction.user.roles) or (interaction.user.id == OWNER_ID)
 
 
-# ----------- Commands -----------
+def has_supporter_role(member: discord.Member) -> bool:
+    role = discord.utils.get(member.guild.roles, name=SUPPORTER_ROLE_NAME)
+    return role in member.roles if role else False
+
+
+# ------------------- Discord Bot Commands -------------------
 
 @bot.tree.command(name="link-roblox", description="Link your Roblox account to your Discord account.")
 async def link_roblox(interaction: discord.Interaction, username: str):
@@ -77,7 +90,6 @@ async def link_roblox(interaction: discord.Interaction, username: str):
 
     roblox_id_str = str(user_id)
 
-    # Prevent duplicate linking
     if discord_id in linked_accounts["discord_to_roblox"]:
         embed.title = "❌ Already Linked"
         embed.description = "Your Discord account is already linked to a Roblox account."
@@ -160,7 +172,7 @@ async def claim_roles(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# ----------- ADMIN COMMANDS -----------
+# ------------------- Admin Commands -------------------
 
 @bot.tree.command(name="list-linked", description="(Admin) List all linked accounts.")
 @app_commands.checks.has_role(ADMIN_ROLE_NAME)
@@ -221,7 +233,62 @@ async def admin_unlink(interaction: discord.Interaction, discord_user: discord.U
         await interaction.response.send_message("❌ User is not linked.", ephemeral=True)
 
 
-# ----------- Helper Functions -----------
+# ------------------- Code Generation & Redemption -------------------
+
+@bot.tree.command(name="generate-code", description="Generate a 1-time redeemable code (Supporters only).")
+async def generate_code(interaction: discord.Interaction):
+    discord_id = str(interaction.user.id)
+    now = datetime.utcnow()
+
+    if not has_supporter_role(interaction.user):
+        await interaction.response.send_message("❌ You need the Supporter role to generate a code.", ephemeral=True)
+        return
+
+    last_generated = linked_accounts["generated_codes"].get(discord_id, {}).get("last_generated")
+    if last_generated:
+        last_generated_dt = datetime.fromisoformat(last_generated)
+        if now - last_generated_dt < timedelta(days=1):
+            await interaction.response.send_message("❌ You can only generate 1 code per day.", ephemeral=True)
+            return
+
+    code = secrets.token_urlsafe(6).upper()
+    linked_accounts["generated_codes"][discord_id] = {
+        "code": code,
+        "expires": (now + timedelta(minutes=10)).isoformat(),
+        "last_generated": now.isoformat()
+    }
+    save_linked_accounts()
+
+    await interaction.response.send_message(f"✅ Your code: `{code}` (expires in 10 minutes)", ephemeral=True)
+
+
+@bot.tree.command(name="redeem-code", description="Redeem a code from the website.")
+async def redeem_code(interaction: discord.Interaction, code: str):
+    discord_id = str(interaction.user.id)
+    now = datetime.utcnow()
+    found = None
+
+    for user_id, data in linked_accounts["generated_codes"].items():
+        if data.get("code") == code:
+            expires = datetime.fromisoformat(data["expires"])
+            if now > expires:
+                await interaction.response.send_message("❌ This code has expired.", ephemeral=True)
+                return
+            found = user_id
+            break
+
+    if not found:
+        await interaction.response.send_message("❌ Invalid code.", ephemeral=True)
+        return
+
+    linked_accounts["generated_codes"][found]["redeemed_by"] = discord_id
+    linked_accounts["generated_codes"][found]["cookie_expires"] = (now + timedelta(days=2)).isoformat()
+    save_linked_accounts()
+
+    await interaction.response.send_message("✅ Code redeemed! Your session will last 2 days.", ephemeral=True)
+
+
+# ------------------- Helper Functions -------------------
 
 async def get_roblox_user_id(username: str) -> int:
     url = "https://users.roblox.com/v1/usernames/users"
@@ -251,13 +318,15 @@ async def remove_gamepass_roles(member: discord.Member):
         await member.remove_roles(*roles_to_remove)
 
 
+# ------------------- Events -------------------
+
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     print(f"✅ Logged in as {bot.user}")
 
 
-# ----------- Minimal web server for hosting -----------
+# ------------------- Minimal Webserver -------------------
 
 async def handle(request):
     return web.Response(text="Bot is running")
@@ -273,7 +342,7 @@ async def run_webserver():
     print(f"🌐 Web server running on port {port}")
 
 
-# ----------- Run bot and webserver concurrently -----------
+# ------------------- Run Bot & Webserver -------------------
 
 async def main():
     await run_webserver()
