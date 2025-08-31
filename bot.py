@@ -1,12 +1,12 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-import requests
 import json
 import os
 from dotenv import load_dotenv
 from aiohttp import web
 import asyncio
+import aiohttp
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -60,28 +60,39 @@ def is_admin(interaction: discord.Interaction) -> bool:
     return (role in interaction.user.roles) or (interaction.user.id == OWNER_ID)
 
 
+# ----------- Commands -----------
+
 @bot.tree.command(name="link-roblox", description="Link your Roblox account to your Discord account.")
 async def link_roblox(interaction: discord.Interaction, username: str):
     embed = discord.Embed(color=discord.Color.blue())
     user_id = await get_roblox_user_id(username)
-    if user_id:
-        roblox_id_str = str(user_id)
-        if roblox_id_str in linked_accounts["roblox_to_discord"]:
-            embed.title = "❌ Already Linked"
-            embed.description = "This Roblox account is already linked to another Discord user."
-            embed.color = discord.Color.red()
-        else:
-            discord_id = str(interaction.user.id)
-            linked_accounts["discord_to_roblox"][discord_id] = user_id
-            linked_accounts["roblox_to_discord"][roblox_id_str] = discord_id
-            save_linked_accounts()
-            embed.title = "✅ Account Linked"
-            embed.description = f"Successfully linked to Roblox account: `{username}`"
-            embed.color = discord.Color.green()
-    else:
+    discord_id = str(interaction.user.id)
+
+    if not user_id:
         embed.title = "❌ User Not Found"
         embed.description = f"Could not find a Roblox user with the username: `{username}`"
         embed.color = discord.Color.red()
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    roblox_id_str = str(user_id)
+
+    # Prevent duplicate linking
+    if discord_id in linked_accounts["discord_to_roblox"]:
+        embed.title = "❌ Already Linked"
+        embed.description = "Your Discord account is already linked to a Roblox account."
+        embed.color = discord.Color.red()
+    elif roblox_id_str in linked_accounts["roblox_to_discord"]:
+        embed.title = "❌ Already Linked"
+        embed.description = "This Roblox account is already linked to another Discord user."
+        embed.color = discord.Color.red()
+    else:
+        linked_accounts["discord_to_roblox"][discord_id] = user_id
+        linked_accounts["roblox_to_discord"][roblox_id_str] = discord_id
+        save_linked_accounts()
+        embed.title = "✅ Account Linked"
+        embed.description = f"Successfully linked to Roblox account: `{username}`"
+        embed.color = discord.Color.green()
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -124,8 +135,6 @@ async def claim_roles(interaction: discord.Interaction):
     roblox_id = linked_accounts["discord_to_roblox"][discord_id]
 
     added_roles = []
-    already_has_roles = []
-    missing_gamepasses = []
 
     for mapping in config["gamepass_roles"]:
         gamepass_id = mapping["gamepass_id"]
@@ -135,20 +144,17 @@ async def claim_roles(interaction: discord.Interaction):
         if role is None:
             continue
         if role in interaction.user.roles:
-            already_has_roles.append(description)
             continue
         if await has_gamepass(roblox_id, gamepass_id):
             await interaction.user.add_roles(role)
             added_roles.append(description)
-        else:
-            missing_gamepasses.append(description)
 
     embed.title = "🎮 Role Claim"
     if added_roles:
         embed.description = "✅ Successfully claimed your roles!"
         embed.color = discord.Color.green()
     else:
-        embed.description = "ℹ️ You have no roles to claim."
+        embed.description = "ℹ️ You have no new roles to claim."
         embed.color = discord.Color.blue()
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -219,22 +225,22 @@ async def admin_unlink(interaction: discord.Interaction, discord_user: discord.U
 
 async def get_roblox_user_id(username: str) -> int:
     url = "https://users.roblox.com/v1/usernames/users"
-    headers = {"Content-Type": "application/json"}
-    data = json.dumps({"usernames": [username]})
-    response = requests.post(url, headers=headers, data=data)
-    if response.status_code == 200:
-        user_data = response.json()
-        if user_data["data"]:
-            return user_data["data"][0]["id"]
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json={"usernames": [username]}) as response:
+            if response.status == 200:
+                user_data = await response.json()
+                if user_data["data"]:
+                    return user_data["data"][0]["id"]
     return None
 
 
 async def has_gamepass(user_id: int, gamepass_id: int) -> bool:
     url = ROBLOX_API_URL.format(user_id=user_id, gamepass_id=gamepass_id)
-    response = requests.get(url)
-    if response.status_code == 200:
-        gamepasses = response.json().get("data", [])
-        return bool(gamepasses)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            if response.status == 200:
+                gamepasses = await response.json()
+                return bool(gamepasses.get("data", []))
     return False
 
 
@@ -248,10 +254,10 @@ async def remove_gamepass_roles(member: discord.Member):
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    print(f"Logged in as {bot.user}")
+    print(f"✅ Logged in as {bot.user}")
 
 
-# ----------- Minimal web server for Render -----------
+# ----------- Minimal web server for hosting -----------
 
 async def handle(request):
     return web.Response(text="Bot is running")
@@ -264,7 +270,7 @@ async def run_webserver():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"Web server running on port {port}")
+    print(f"🌐 Web server running on port {port}")
 
 
 # ----------- Run bot and webserver concurrently -----------
