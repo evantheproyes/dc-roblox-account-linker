@@ -19,7 +19,7 @@ CONFIG_FILE = "config.json"
 ADMIN_ROLE_NAME = "🔨Mod"
 SUPPORTER_ROLE_NAME = "Supporter"
 OWNER_ID = 1322627642746339432
-BACKEND_URL = "https://YOUR_RENDER_BACKEND_URL"  # Replace with your actual endpoint
+BACKEND_URL = "https://backend-2-0-9uod.onrender.com/redeem"  # Replace with your actual endpoint
 ROBLOX_API_URL = "https://inventory.roblox.com/v1/users/{user_id}/items/GamePass/{gamepass_id}"
 
 
@@ -352,3 +352,4 @@ async def main():
 if __name__ == "__main__":
     load_dotenv()
     asyncio.run(main())
+
