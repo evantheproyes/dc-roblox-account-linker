@@ -9,6 +9,8 @@ import asyncio
 import aiohttp
 from datetime import datetime, timedelta
 import secrets
+import time
+from typing import Dict, Optional
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -22,6 +24,11 @@ OWNER_ID = 1322627642746339432
 BACKEND_URL = "https://backend-2-0-9uod.onrender.com/redeem"  # Replace with your actual endpoint
 ROBLOX_API_URL = "https://inventory.roblox.com/v1/users/{user_id}/items/GamePass/{gamepass_id}"
 
+# Rate limiting and caching
+roblox_cache: Dict[str, Dict] = {}
+cache_expiry = 300  # 5 minutes cache
+last_request_time = 0
+min_request_interval = 1.0  # Minimum time between Roblox API requests
 
 # ------------------- Load Config & Accounts -------------------
 
@@ -71,6 +78,91 @@ def is_admin(interaction: discord.Interaction) -> bool:
 def has_supporter_role(member: discord.Member) -> bool:
     role = discord.utils.get(member.guild.roles, name=SUPPORTER_ROLE_NAME)
     return role in member.roles if role else False
+
+
+# ------------------- Rate Limited API Calls -------------------
+
+async def rate_limited_request():
+    """Ensure we don't make requests too frequently"""
+    global last_request_time
+    current_time = time.time()
+    elapsed = current_time - last_request_time
+    
+    if elapsed < min_request_interval:
+        await asyncio.sleep(min_request_interval - elapsed)
+    
+    last_request_time = time.time()
+
+
+async def get_roblox_user_id(username: str) -> Optional[int]:
+    """Get Roblox user ID with caching and rate limiting"""
+    # Check cache first
+    cache_key = f"user_{username}"
+    if cache_key in roblox_cache:
+        cached_data = roblox_cache[cache_key]
+        if time.time() - cached_data["timestamp"] < cache_expiry:
+            return cached_data["data"]
+    
+    # Rate limit our requests
+    await rate_limited_request()
+    
+    url = "https://users.roblox.com/v1/usernames/users"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json={"usernames": [username]}, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    user_data = await response.json()
+                    if user_data["data"]:
+                        user_id = user_data["data"][0]["id"]
+                        # Cache the result
+                        roblox_cache[cache_key] = {
+                            "data": user_id,
+                            "timestamp": time.time()
+                        }
+                        return user_id
+                elif response.status == 429:  # Rate limited
+                    retry_after = int(response.headers.get("Retry-After", 5))
+                    await asyncio.sleep(retry_after)
+                    return await get_roblox_user_id(username)  # Retry
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        pass
+    
+    return None
+
+
+async def has_gamepass(user_id: int, gamepass_id: int) -> bool:
+    """Check if user has gamepass with caching and rate limiting"""
+    # Check cache first
+    cache_key = f"gamepass_{user_id}_{gamepass_id}"
+    if cache_key in roblox_cache:
+        cached_data = roblox_cache[cache_key]
+        if time.time() - cached_data["timestamp"] < cache_expiry:
+            return cached_data["data"]
+    
+    # Rate limit our requests
+    await rate_limited_request()
+    
+    url = ROBLOX_API_URL.format(user_id=user_id, gamepass_id=gamepass_id)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    gamepasses = await response.json()
+                    has_pass = bool(gamepasses.get("data", []))
+                    # Cache the result
+                    roblox_cache[cache_key] = {
+                        "data": has_pass,
+                        "timestamp": time.time()
+                    }
+                    return has_pass
+                elif response.status == 429:  # Rate limited
+                    retry_after = int(response.headers.get("Retry-After", 5))
+                    await asyncio.sleep(retry_after)
+                    return await has_gamepass(user_id, gamepass_id)  # Retry
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        pass
+    
+    return False
 
 
 # ------------------- Discord Bot Commands -------------------
@@ -290,27 +382,6 @@ async def redeem_code(interaction: discord.Interaction, code: str):
 
 # ------------------- Helper Functions -------------------
 
-async def get_roblox_user_id(username: str) -> int:
-    url = "https://users.roblox.com/v1/usernames/users"
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json={"usernames": [username]}) as response:
-            if response.status == 200:
-                user_data = await response.json()
-                if user_data["data"]:
-                    return user_data["data"][0]["id"]
-    return None
-
-
-async def has_gamepass(user_id: int, gamepass_id: int) -> bool:
-    url = ROBLOX_API_URL.format(user_id=user_id, gamepass_id=gamepass_id)
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            if response.status == 200:
-                gamepasses = await response.json()
-                return bool(gamepasses.get("data", []))
-    return False
-
-
 async def remove_gamepass_roles(member: discord.Member):
     role_ids = [mapping["role_id"] for mapping in config["gamepass_roles"]]
     roles_to_remove = [role for role in member.roles if role.id in role_ids]
@@ -352,4 +423,3 @@ async def main():
 if __name__ == "__main__":
     load_dotenv()
     asyncio.run(main())
-
